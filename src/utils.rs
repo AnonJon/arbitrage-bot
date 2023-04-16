@@ -1,5 +1,4 @@
 use crate::contract_interfaces::{IUniswapV2Pair, IERC20};
-use anyhow::Error;
 use ethers::{
     core::types::{Address, U256},
     providers::{Http, Provider},
@@ -7,6 +6,8 @@ use ethers::{
 use eyre::Result;
 use serde::Deserialize;
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +23,26 @@ pub struct Config {
     #[serde(rename = "tokenNames")]
     pub token_names: Vec<String>,
 }
+#[derive(Debug, Deserialize)]
+pub struct Pair {
+    pub pair: Vec<String>,
+    pub address: Address,
+}
+
+pub async fn get_symbols(
+    client: &Arc<Provider<Http>>,
+    contract_address: Address,
+) -> Result<(String, String)> {
+    let contract = IUniswapV2Pair::new(contract_address, client.clone());
+
+    let token_a = IERC20::new(contract.token_0().call().await?, client.clone());
+    let token_b = IERC20::new(contract.token_1().call().await?, client.clone());
+
+    let token_a_name = token_a.symbol().call().await? as String;
+    let token_b_name = token_b.symbol().call().await? as String;
+
+    Ok((token_a_name, token_b_name))
+}
 
 // 1 token0 = x token1
 pub async fn get_reserves(
@@ -33,6 +54,7 @@ pub async fn get_reserves(
     let token_b = IERC20::new(contract.token_1().call().await?, client.clone());
     let token_a_decimals = token_a.decimals().call().await? as u32;
     let token_b_decimals = token_b.decimals().call().await? as u32;
+
     let reserves = contract.get_reserves().call().await?;
     let reserve0: U256 = reserves.0.into();
     let reserve1: U256 = reserves.1.into();
@@ -109,8 +131,8 @@ pub fn check_arbitrage_opportunity(
     }
 
     if let (
-        Some((buy_exchange, buy_price, buy_impact, buy_execution_price)),
-        Some((sell_exchange, sell_price, sell_impact, sell_execution_price)),
+        Some((buy_exchange, buy_price, buy_impact, _buy_execution_price)),
+        Some((sell_exchange, sell_price, sell_impact, _sell_execution_price)),
     ) = (buy_opportunity, sell_opportunity)
     {
         let buy_exchange_reserves = prices
@@ -130,12 +152,14 @@ pub fn check_arbitrage_opportunity(
             buy_exchange_reserves.1,
             token0_to_token1,
         );
+
         let amount_out_sell = calc_amount(
             amount_out_buy,
             sell_exchange_reserves.0,
             sell_exchange_reserves.1,
             !token0_to_token1,
         );
+        println!("Trade Route: {trade_amount} {selling} -> {amount_out_buy} {buying} -> {amount_out_sell} {selling}");
 
         if amount_out_sell > trade_amount {
             let arbitrage_profit = amount_out_sell - trade_amount;
@@ -161,11 +185,11 @@ pub fn check_arbitrage_opportunity(
                 false
             }
         } else {
-            println!("No arbitrage opportunity found with a positive profit. Buy price {} | Sell price {}", buy_execution_price, amount_out_sell);
+            println!("No arbitrage opportunity found with a positive profit.\n");
             false
         }
     } else {
-        println!("No arbitrage opportunity found.");
+        println!("No arbitrage opportunity found.\n");
         false
     }
 }
@@ -235,6 +259,42 @@ pub fn wei_to_eth(wei: U256) -> f64 {
     let wei_f64 = wei.to_string().parse::<f64>().unwrap();
     let divisor_f64 = divisor.to_string().parse::<f64>().unwrap();
     wei_f64 / divisor_f64
+}
+
+pub fn get_exchange_groups(exchanges: Vec<&str>, pools: Vec<Vec<Address>>) -> Vec<Vec<Address>> {
+    let mut exchange_pools = vec![];
+    for (i, exchange) in exchanges.iter().enumerate() {
+        println!("{} liquidity pools:", exchange);
+
+        let mut pools_for_exchange = vec![];
+        for pool in &pools[i] {
+            println!("{}", pool);
+            pools_for_exchange.push(*pool);
+        }
+        exchange_pools.push(pools_for_exchange);
+    }
+
+    exchange_pools
+}
+
+pub fn read_exchanges_from_file(
+    exchanges: Vec<&str>,
+    network: u16,
+) -> Result<Vec<Vec<Address>>, Box<dyn std::error::Error>> {
+    let mut pools: Vec<Vec<Address>> = Vec::new();
+    for exchange in exchanges {
+        let mut x: Vec<Address> = Vec::new();
+        let mut file = File::open(format!("./src/data/{network}/{exchange}.config.json"))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        let pairs: Vec<Pair> = serde_json::from_str(&contents)?;
+        for pair in &pairs {
+            x.push(pair.address);
+        }
+        pools.push(x);
+    }
+
+    Ok(pools)
 }
 
 #[cfg(test)]

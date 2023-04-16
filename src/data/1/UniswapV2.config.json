@@ -1,0 +1,14 @@
+[
+  {
+    "pair": ["LINK", "ETH"],
+    "address": "0xa2107fa5b38d9bbd2c461d6edf11b11a50f6b974"
+  },
+  {
+    "pair": ["USDC", "ETH"],
+    "address": "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc"
+  },
+  {
+    "pair": ["LDO", "ETH"],
+    "address": "0x454f11d58e27858926d7a4ece8bfea2c33e97b13"
+  }
+]
