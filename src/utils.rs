@@ -5,6 +5,7 @@ use ethers::{
 };
 use eyre::Result;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -48,12 +49,12 @@ pub async fn get_symbols(
 pub async fn get_reserves(
     client: &Arc<Provider<Http>>,
     contract_address: Address,
-) -> Result<(U256, U256, U256, U256)> {
+) -> Result<(U256, U256, U256, U256, u8, u8)> {
     let contract = IUniswapV2Pair::new(contract_address, client.clone());
     let token_a = IERC20::new(contract.token_0().call().await?, client.clone());
     let token_b = IERC20::new(contract.token_1().call().await?, client.clone());
-    let token_a_decimals = token_a.decimals().call().await? as u32;
-    let token_b_decimals = token_b.decimals().call().await? as u32;
+    let token_a_decimals = token_a.decimals().call().await? as u8;
+    let token_b_decimals = token_b.decimals().call().await? as u8;
 
     let reserves = contract.get_reserves().call().await?;
     let reserve0: U256 = reserves.0.into();
@@ -75,7 +76,14 @@ pub async fn get_reserves(
         current_price_left = (reserve0 * precision) / reserve1;
     }
 
-    Ok((current_price_left, current_price_right, reserve0, reserve1))
+    Ok((
+        current_price_left,
+        current_price_right,
+        reserve0,
+        reserve1,
+        token_a_decimals,
+        token_b_decimals,
+    ))
 }
 
 pub fn check_arbitrage_opportunity(
@@ -84,18 +92,20 @@ pub fn check_arbitrage_opportunity(
     threshold: U256,
     trade_amount: U256,
     token0_to_token1: bool,
+    decimals_a: u8,
+    decimals_b: u8,
 ) -> bool {
     let mut buy_opportunity: Option<(String, U256, U256, U256)> = None;
     let mut sell_opportunity: Option<(String, U256, U256, U256)> = None;
     let selling = if token0_to_token1 {
-        token_pair.0
+        (token_pair.0, decimals_a)
     } else {
-        token_pair.1
+        (token_pair.1, decimals_b)
     };
     let buying = if token0_to_token1 {
-        token_pair.1
+        (token_pair.1, decimals_b)
     } else {
-        token_pair.0
+        (token_pair.0, decimals_a)
     };
 
     for (exchange, price, reserve_a, reserve_b) in prices {
@@ -103,12 +113,18 @@ pub fn check_arbitrage_opportunity(
             calculate_price_impact(trade_amount, *reserve_a, *reserve_b, token0_to_token1);
         if let Some((price_impact, execution_price)) = calc_prices {
             println!(
-                "Exchange: {} ({selling} -> {buying})| Price Per {buying}: {} {selling} | Total Selling: {} {selling} | Price Impact: {} | Execution Price: {} {buying}",
+                "Exchange: {} ({} -> {})| Price Per {}: {} {} ({} dec) | Total Selling: {} {} ({} dec) | Price Impact: {} bps",
                 exchange,
+                selling.0,
+                buying.0,
+                buying.0,
                 price,
+                selling.0,
+                selling.1,
                 trade_amount,
-                price_impact,
-                execution_price
+                selling.0,
+                selling.1,
+                price_impact
             );
 
             if buy_opportunity
@@ -135,31 +151,45 @@ pub fn check_arbitrage_opportunity(
         Some((sell_exchange, sell_price, sell_impact, _sell_execution_price)),
     ) = (buy_opportunity, sell_opportunity)
     {
+        if buy_exchange == sell_exchange {
+            println!("No arbitrage opportunity found between different exchanges.\n");
+            return false;
+        }
         let buy_exchange_reserves = prices
             .iter()
             .find(|(exchange, _, _, _)| exchange == &buy_exchange)
-            .map(|(_, _, reserve_a, reserve_b)| (*reserve_a, *reserve_b))
+            .map(|(exchange, _, reserve_a, reserve_b)| (exchange, *reserve_a, *reserve_b))
             .unwrap();
         let sell_exchange_reserves = prices
             .iter()
             .find(|(exchange, _, _, _)| exchange == &sell_exchange)
-            .map(|(_, _, reserve_a, reserve_b)| (*reserve_a, *reserve_b))
+            .map(|(exchange, _, reserve_a, reserve_b)| (exchange, *reserve_a, *reserve_b))
             .unwrap();
 
         let amount_out_buy = calc_amount(
             trade_amount,
-            buy_exchange_reserves.0,
             buy_exchange_reserves.1,
+            buy_exchange_reserves.2,
             token0_to_token1,
         );
 
         let amount_out_sell = calc_amount(
             amount_out_buy,
-            sell_exchange_reserves.0,
             sell_exchange_reserves.1,
+            sell_exchange_reserves.2,
             !token0_to_token1,
         );
-        println!("Trade Route: {trade_amount} {selling} -> {amount_out_buy} {buying} -> {amount_out_sell} {selling}");
+        println!(
+            "Trade Route: {} -> {} | {} {} -> {} {} -> {} {}",
+            buy_exchange_reserves.0,
+            sell_exchange_reserves.0,
+            trade_amount,
+            selling.0,
+            amount_out_buy,
+            buying.0,
+            amount_out_sell,
+            selling.0,
+        );
 
         if amount_out_sell > trade_amount {
             let arbitrage_profit = amount_out_sell - trade_amount;
@@ -168,13 +198,13 @@ pub fn check_arbitrage_opportunity(
                 println!(
                     "Arbitrage opportunity found! Profit {} ETH | Buy {} with {} from {} for price {} (Price Impact: {}), sell {} for {} to {} for price {} (Price Impact: {}).",
                     p,
-                    selling,
-                    buying,
+                    selling.0,
+                    buying.0,
                     buy_exchange,
                     buy_price,
                     buy_impact,
-                    selling,
-                    buying,
+                    selling.0,
+                    buying.0,
                     sell_exchange,
                     sell_price,
                     sell_impact
@@ -261,23 +291,63 @@ pub fn wei_to_eth(wei: U256) -> f64 {
     wei_f64 / divisor_f64
 }
 
-pub fn get_exchange_groups(exchanges: Vec<&str>, pools: Vec<Vec<Address>>) -> Vec<Vec<Address>> {
-    let mut exchange_pools = vec![];
-    for (i, exchange) in exchanges.iter().enumerate() {
-        println!("{} liquidity pools:", exchange);
+pub fn get_common_pairs(
+    exchanges: &Vec<&str>,
+    network: u16,
+) -> Result<Vec<Vec<Address>>, Box<dyn std::error::Error>> {
+    let mut all_pairs = Vec::new();
 
-        let mut pools_for_exchange = vec![];
-        for pool in &pools[i] {
-            println!("{}", pool);
-            pools_for_exchange.push(*pool);
-        }
-        exchange_pools.push(pools_for_exchange);
+    for exchange in exchanges {
+        let mut file = File::open(format!("./src/data/{network}/{exchange}.config.json"))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        let pairs: Vec<Pair> = serde_json::from_str(&contents)?;
+        let exchange_pairs = pairs
+            .iter()
+            .map(|pair| {
+                let mut sorted_pair = pair.pair.clone();
+                sorted_pair.sort_unstable();
+                (
+                    (sorted_pair[0].clone(), sorted_pair[1].clone()),
+                    pair.address,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        all_pairs.push(exchange_pairs);
     }
 
-    exchange_pools
+    let common_symbols: Option<HashSet<(String, String)>> = all_pairs.iter().fold(
+        None,
+        |common_symbols: Option<HashSet<(String, String)>>,
+         exchange_pairs: &HashMap<(String, String), Address>| match common_symbols {
+            Some(current_common_symbols) => {
+                let keys_set = exchange_pairs.keys().cloned().collect::<HashSet<_>>();
+                let intersection = current_common_symbols
+                    .intersection(&keys_set)
+                    .cloned()
+                    .collect();
+                Some(intersection)
+            }
+            None => Some(exchange_pairs.keys().cloned().collect::<HashSet<_>>()),
+        },
+    );
+
+    let common_symbols = common_symbols.ok_or("No common pairs found.")?;
+
+    let mut common_addresses_per_exchange = vec![Vec::new(); exchanges.len()];
+
+    for symbol_pair in common_symbols {
+        for (exchange_index, exchange_pairs) in all_pairs.iter().enumerate() {
+            if let Some(address) = exchange_pairs.get(&symbol_pair) {
+                common_addresses_per_exchange[exchange_index].push(*address);
+            }
+        }
+    }
+
+    Ok(common_addresses_per_exchange)
 }
 
-pub fn read_exchanges_from_file(
+pub fn _read_exchanges_from_file(
     exchanges: Vec<&str>,
     network: u16,
 ) -> Result<Vec<Vec<Address>>, Box<dyn std::error::Error>> {
@@ -295,6 +365,14 @@ pub fn read_exchanges_from_file(
     }
 
     Ok(pools)
+}
+
+pub fn create_trade_amount_range(token_decimals: u8) -> (U256, U256, U256) {
+    let trade_amount = U256::from(1) * U256::exp10(token_decimals.into());
+    let max_trade_amount = U256::from(3) * U256::exp10(token_decimals.into());
+    let trade_amount_step = U256::from(1) * U256::exp10((token_decimals).into());
+
+    (trade_amount, max_trade_amount, trade_amount_step)
 }
 
 #[cfg(test)]
@@ -328,6 +406,8 @@ mod tests {
             threshold,
             trade_amount,
             token0_to_token1,
+            18,
+            18,
         );
         assert_eq!(op, true);
     }
@@ -359,6 +439,8 @@ mod tests {
             threshold,
             trade_amount,
             token0_to_token1,
+            18,
+            18,
         );
         assert_eq!(op, false);
     }

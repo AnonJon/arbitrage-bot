@@ -10,5 +10,9 @@
   {
     "pair": ["LDO", "ETH"],
     "address": "0x454f11d58e27858926d7a4ece8bfea2c33e97b13"
+  },
+  {
+    "pair": ["WBTC", "ETH"],
+    "address": "0xbb2b8038a1640196fbe3e38816f3e67cba72d940"
   }
 ]

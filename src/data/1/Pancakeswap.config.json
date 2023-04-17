@@ -12,7 +12,7 @@
     "address": "0xc558f600b34a5f69dd2f0d06cb8a88d829b7420a"
   },
   {
-    "pair": ["WBTC", "ETH"],
-    "address": "0xceff51756c56ceffca006cd410b03ffc46dd3a58"
+    "pair": ["ETH", "WBTC"],
+    "address": "0x4AB6702B3Ed3877e9b1f203f90cbEF13d663B0e8"
   }
 ]
