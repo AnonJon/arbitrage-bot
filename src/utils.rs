@@ -5,25 +5,14 @@ use ethers::{
 };
 use eyre::Result;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
-pub struct Config {
-    #[serde(rename = "contractCreation")]
-    pub contract_creation_block: u64,
-    #[serde(rename = "contractAddress")]
-    pub contract_address: Address,
-    #[serde(rename = "blockHeight")]
-    pub block_height: u64,
-    #[serde(rename = "tokenAddresses")]
-    pub token_addresses: Vec<Address>,
-    #[serde(rename = "tokenNames")]
-    pub token_names: Vec<String>,
-}
+pub struct Config {}
 #[derive(Debug, Deserialize)]
 pub struct Pair {
     pub pair: Vec<String>,
@@ -292,59 +281,41 @@ pub fn wei_to_eth(wei: U256) -> f64 {
 }
 
 pub fn get_common_pairs(
-    exchanges: &Vec<&str>,
-    network: u16,
-) -> Result<Vec<Vec<Address>>, Box<dyn std::error::Error>> {
-    let mut all_pairs = Vec::new();
-
+    exchanges: &[&str],
+    network: u32,
+) -> Result<HashMap<(String, String), Vec<(String, Address)>>, Box<dyn std::error::Error>> {
+    let mut all_pairs: Vec<HashMap<(String, String), Address>> = Vec::new();
     for exchange in exchanges {
         let mut file = File::open(format!("./src/data/{network}/{exchange}.config.json"))?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        let pairs: Vec<Pair> = serde_json::from_str(&contents)?;
-        let exchange_pairs = pairs
-            .iter()
-            .map(|pair| {
-                let mut sorted_pair = pair.pair.clone();
-                sorted_pair.sort_unstable();
+        let data: Vec<Pair> = serde_json::from_str(&contents)?;
+        let pairs_map = data
+            .into_iter()
+            .map(|pair_data| {
                 (
-                    (sorted_pair[0].clone(), sorted_pair[1].clone()),
-                    pair.address,
+                    (pair_data.pair[0].clone(), pair_data.pair[1].clone()),
+                    pair_data.address,
                 )
             })
-            .collect::<HashMap<_, _>>();
-        all_pairs.push(exchange_pairs);
+            .collect();
+        all_pairs.push(pairs_map);
     }
 
-    let common_symbols: Option<HashSet<(String, String)>> = all_pairs.iter().fold(
-        None,
-        |common_symbols: Option<HashSet<(String, String)>>,
-         exchange_pairs: &HashMap<(String, String), Address>| match common_symbols {
-            Some(current_common_symbols) => {
-                let keys_set = exchange_pairs.keys().cloned().collect::<HashSet<_>>();
-                let intersection = current_common_symbols
-                    .intersection(&keys_set)
-                    .cloned()
-                    .collect();
-                Some(intersection)
-            }
-            None => Some(exchange_pairs.keys().cloned().collect::<HashSet<_>>()),
-        },
-    );
+    let mut common_pairs: HashMap<(String, String), Vec<(String, Address)>> = HashMap::new();
 
-    let common_symbols = common_symbols.ok_or("No common pairs found.")?;
-
-    let mut common_addresses_per_exchange = vec![Vec::new(); exchanges.len()];
-
-    for symbol_pair in common_symbols {
-        for (exchange_index, exchange_pairs) in all_pairs.iter().enumerate() {
-            if let Some(address) = exchange_pairs.get(&symbol_pair) {
-                common_addresses_per_exchange[exchange_index].push(*address);
-            }
+    for (exchange, pairs) in exchanges.iter().zip(all_pairs.iter()) {
+        for (symbol_pair, address) in pairs {
+            common_pairs
+                .entry(symbol_pair.clone())
+                .or_insert_with(Vec::new)
+                .push((exchange.to_string(), *address));
         }
     }
 
-    Ok(common_addresses_per_exchange)
+    common_pairs.retain(|_, v| v.len() >= 2);
+
+    Ok(common_pairs)
 }
 
 pub fn _read_exchanges_from_file(

@@ -1,6 +1,6 @@
 use crate::utils::{
     check_arbitrage_opportunity, create_client, create_trade_amount_range, get_common_pairs,
-    get_reserves, get_symbols,
+    get_reserves,
 };
 use ethers::core::types::U256;
 use eyre::Result;
@@ -13,26 +13,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = create_client().await?;
     let exchanges = vec!["Sushiswap", "UniswapV2", "Pancakeswap"];
     let network = 1;
-    let e = exchanges.clone();
-    let pools = get_common_pairs(&exchanges, network)?;
+    let common_pairs = get_common_pairs(&exchanges, network)?;
     let mut arb_opportunities: Vec<String> = vec![];
 
     let alert_threshold = U256::from(10);
-    for pool_index in 0..pools[0].len() {
-        let (symbol_a, symbol_b) = get_symbols(&client, pools[0][pool_index]).await?;
+    for (symbol_pair, exchange_addresses) in common_pairs {
+        let (symbol_a, symbol_b) = symbol_pair;
 
         let mut prices_and_reserves_left = vec![];
         let mut prices_and_reserves_right = vec![];
         let mut decimals_a = 0;
         let mut decimals_b = 0;
 
-        for (exchange, exchange_pools) in e.iter().zip(pools.iter()) {
+        for (exchange, address) in exchange_addresses {
             let (left, right, reserve_a, reserve_b, token_a_decimal, token_b_decimal) =
-                get_reserves(&client, exchange_pools[pool_index]).await?;
+                get_reserves(&client, address).await?;
             decimals_a = token_a_decimal;
             decimals_b = token_b_decimal;
-            prices_and_reserves_left.push((exchange.to_string(), left, reserve_a, reserve_b));
-            prices_and_reserves_right.push((exchange.to_string(), right, reserve_a, reserve_b));
+            prices_and_reserves_left.push((exchange.clone(), left, reserve_a, reserve_b));
+            prices_and_reserves_right.push((exchange.clone(), right, reserve_a, reserve_b));
         }
 
         // Determine the trade amount range for token A and token B
