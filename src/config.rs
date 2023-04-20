@@ -18,6 +18,7 @@ pub const CURVE_ETH_LINK_ADDRESS: &str = "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f
 // Compound Addresses
 
 // Balancer Addresses
+pub const BALANCER_VAULT_ADDRESS: &str = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 
 // Uniswap V2 Addresses
 pub const UNISWAP_LINK_ETH_ADDRESS: &str = "0xa2107fa5b38d9bbd2c461d6edf11b11a50f6b974";

@@ -1,22 +1,18 @@
-use crate::utils::{
-    check_arbitrage_opportunity, create_client, create_trade_amount_range, get_common_pairs,
-    get_reserves,
-};
+use arbitrage_bot::client::ArbClient;
+use arbitrage_bot::utils::{check_arbitrage_opportunity, create_trade_amount_range, get_reserves};
 use ethers::core::types::U256;
 use eyre::Result;
-mod config;
-mod contract_interfaces;
-mod utils;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = create_client().await?;
-    let exchanges = vec!["Sushiswap", "UniswapV2", "Pancakeswap"];
+    let exchanges = vec!["Sushiswap", "UniswapV2", "Pancakeswap", "Balancer"];
+    let exchanges_vec: Vec<String> = exchanges.iter().map(|s| String::from(*s)).collect();
     let network = 1;
-    let common_pairs = get_common_pairs(&exchanges, network)?;
+    let arb_client = ArbClient::new(network, exchanges_vec).await?;
+    let common_pairs = arb_client.get_common_pairs(&exchanges)?;
     let mut arb_opportunities: Vec<String> = vec![];
 
-    let alert_threshold = U256::from(10);
+    let alert_threshold = U256::from(10); // pbs to alert
     for (symbol_pair, exchange_addresses) in common_pairs {
         let (symbol_a, symbol_b) = symbol_pair;
 
@@ -27,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for (exchange, address) in exchange_addresses {
             let (left, right, reserve_a, reserve_b, token_a_decimal, token_b_decimal) =
-                get_reserves(&client, address).await?;
+                get_reserves(&arb_client.client, address, exchange.as_str()).await?;
             decimals_a = token_a_decimal;
             decimals_b = token_b_decimal;
             prices_and_reserves_left.push((exchange.clone(), left, reserve_a, reserve_b));

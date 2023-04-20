@@ -14,5 +14,9 @@
   {
     "pair": ["WBTC", "ETH"],
     "address": "0xbb2b8038a1640196fbe3e38816f3e67cba72d940"
+  },
+  {
+    "pair": ["stETH", "ETH"],
+    "address": "0x4028daac072e492d34a3afdbef0ba7e35d8b55c4"
   }
 ]

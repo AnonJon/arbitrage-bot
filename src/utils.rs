@@ -1,12 +1,14 @@
+use crate::balancer::balancer_pair;
 use crate::contract_interfaces::{IUniswapV2Pair, IERC20};
+use crate::uniswap_v2::uniswap_v2_pair;
 use ethers::{
+    contract::{Multicall, MulticallVersion},
     core::types::{Address, U256},
     providers::{Http, Provider},
+    utils::hex::FromHex,
 };
 use eyre::Result;
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
@@ -19,7 +21,7 @@ pub struct Pair {
     pub address: Address,
 }
 
-pub async fn get_symbols(
+pub async fn _get_symbols(
     client: &Arc<Provider<Http>>,
     contract_address: Address,
 ) -> Result<(String, String)> {
@@ -28,50 +30,77 @@ pub async fn get_symbols(
     let token_a = IERC20::new(contract.token_0().call().await?, client.clone());
     let token_b = IERC20::new(contract.token_1().call().await?, client.clone());
 
-    let token_a_name = token_a.symbol().call().await? as String;
-    let token_b_name = token_b.symbol().call().await? as String;
+    let mut multicall: Multicall<Provider<Http>> = Multicall::new(client.clone(), None)
+        .await?
+        .version(MulticallVersion::Multicall3);
+    multicall
+        .add_call(token_a.symbol(), false)
+        .add_call(token_b.symbol(), false);
+    let return_data: (String, String) = multicall.call().await?;
 
-    Ok((token_a_name, token_b_name))
+    Ok((return_data.0, return_data.1))
 }
 
 // 1 token0 = x token1
 pub async fn get_reserves(
     client: &Arc<Provider<Http>>,
     contract_address: Address,
+    exchange: &str,
 ) -> Result<(U256, U256, U256, U256, u8, u8)> {
-    let contract = IUniswapV2Pair::new(contract_address, client.clone());
-    let token_a = IERC20::new(contract.token_0().call().await?, client.clone());
-    let token_b = IERC20::new(contract.token_1().call().await?, client.clone());
-    let token_a_decimals = token_a.decimals().call().await? as u8;
-    let token_b_decimals = token_b.decimals().call().await? as u8;
+    let token_0: Address;
+    let token_1: Address;
+    let reserves_0: U256;
+    let reserves_1: U256;
+    match exchange {
+        "UniswapV2" | "Sushiswap" | "Pancakeswap" => {
+            let (tokens, reserves) = uniswap_v2_pair(client, contract_address).await?;
+            token_0 = tokens[0];
+            token_1 = tokens[1];
+            reserves_0 = reserves[0];
+            reserves_1 = reserves[1];
+        }
+        "Balancer" => {
+            let (tokens, reserves) = balancer_pair(client, contract_address).await?;
+            token_0 = tokens[0];
+            token_1 = tokens[1];
+            reserves_0 = reserves[0];
+            reserves_1 = reserves[1];
+        }
+        _ => {
+            return Err(eyre::eyre!("Exchange not supported"));
+        }
+    }
 
-    let reserves = contract.get_reserves().call().await?;
-    let reserve0: U256 = reserves.0.into();
-    let reserve1: U256 = reserves.1.into();
+    let token_a = IERC20::new(token_0, client.clone());
+    let token_b = IERC20::new(token_1, client.clone());
+
+    let decimals_a = token_a.decimals().call().await? as u8;
+    let decimals_b = token_b.decimals().call().await? as u8;
+
     let precision = U256::exp10(18);
-    let diviser = U256::from(10).pow((18 - token_b_decimals + token_a_decimals).into());
+    let diviser = U256::from(10).pow((18 - decimals_b + decimals_a).into());
     let current_price_left: U256;
     let current_price_right: U256;
 
-    if token_a_decimals < 18 {
-        current_price_right = (reserve1 * diviser) / reserve0;
+    if decimals_a < 18 {
+        current_price_right = (reserves_1 * diviser) / reserves_0;
     } else {
-        current_price_right = (reserve1 * precision) / reserve0;
+        current_price_right = (reserves_1 * precision) / reserves_0;
     }
 
-    if token_b_decimals < 18 {
-        current_price_left = (reserve0 * diviser) / reserve1;
+    if decimals_b < 18 {
+        current_price_left = (reserves_0 * diviser) / reserves_1;
     } else {
-        current_price_left = (reserve0 * precision) / reserve1;
+        current_price_left = (reserves_0 * precision) / reserves_1;
     }
 
     Ok((
         current_price_left,
         current_price_right,
-        reserve0,
-        reserve1,
-        token_a_decimals,
-        token_b_decimals,
+        reserves_0,
+        reserves_1,
+        decimals_a,
+        decimals_b,
     ))
 }
 
@@ -265,57 +294,11 @@ fn calculate_price_impact(
     Some((price_impact, execution_price))
 }
 
-pub async fn create_client() -> Result<Arc<Provider<Http>>> {
-    let rpc_url = &env::var("ETHEREUM_RPC_URL").expect("ETHEREUM_RPC_URL must be set");
-    let provider = Provider::<Http>::try_from(rpc_url)?;
-    let client = Arc::new(provider);
-
-    Ok(client)
-}
-
 pub fn wei_to_eth(wei: U256) -> f64 {
     let divisor = U256::exp10(18);
     let wei_f64 = wei.to_string().parse::<f64>().unwrap();
     let divisor_f64 = divisor.to_string().parse::<f64>().unwrap();
     wei_f64 / divisor_f64
-}
-
-pub fn get_common_pairs(
-    exchanges: &[&str],
-    network: u32,
-) -> Result<HashMap<(String, String), Vec<(String, Address)>>, Box<dyn std::error::Error>> {
-    let mut all_pairs: Vec<HashMap<(String, String), Address>> = Vec::new();
-    for exchange in exchanges {
-        let mut file = File::open(format!("./src/data/{network}/{exchange}.config.json"))?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let data: Vec<Pair> = serde_json::from_str(&contents)?;
-        let pairs_map = data
-            .into_iter()
-            .map(|pair_data| {
-                (
-                    (pair_data.pair[0].clone(), pair_data.pair[1].clone()),
-                    pair_data.address,
-                )
-            })
-            .collect();
-        all_pairs.push(pairs_map);
-    }
-
-    let mut common_pairs: HashMap<(String, String), Vec<(String, Address)>> = HashMap::new();
-
-    for (exchange, pairs) in exchanges.iter().zip(all_pairs.iter()) {
-        for (symbol_pair, address) in pairs {
-            common_pairs
-                .entry(symbol_pair.clone())
-                .or_insert_with(Vec::new)
-                .push((exchange.to_string(), *address));
-        }
-    }
-
-    common_pairs.retain(|_, v| v.len() >= 2);
-
-    Ok(common_pairs)
 }
 
 pub fn _read_exchanges_from_file(
@@ -344,6 +327,15 @@ pub fn create_trade_amount_range(token_decimals: u8) -> (U256, U256, U256) {
     let trade_amount_step = U256::from(1) * U256::exp10((token_decimals).into());
 
     (trade_amount, max_trade_amount, trade_amount_step)
+}
+
+pub fn bytes32_from_hex(hex: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = FromHex::from_hex(hex).unwrap();
+    let mut array = [0u8; 32];
+    for (index, value) in bytes.iter().enumerate() {
+        array[index] = *value;
+    }
+    array
 }
 
 #[cfg(test)]

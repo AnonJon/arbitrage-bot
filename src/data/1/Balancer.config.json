@@ -1,0 +1,14 @@
+[
+  {
+    "pair": ["WBTC", "ETH"],
+    "address": "0xA6F548DF93de924d73be7D25dC02554c6bD66dB5"
+  },
+  {
+    "pair": ["LINK", "ETH"],
+    "address": "0xE99481DC77691d8E2456E5f3F61C1810adFC1503"
+  },
+  {
+    "pair": ["OHM", "ETH"],
+    "address": "0xD1eC5e215E8148D76F4460e4097FD3d5ae0A3558"
+  }
+]
